@@ -6,8 +6,8 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>아이클라우드 영업일지</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap');
 :root{
@@ -959,10 +959,15 @@ function go(v){
   if(v==='map'){
     scr.style.display='none';
     mw.classList.add('active');
-    // 지도는 이미 초기화됨 → 크기만 재계산
-    if(window._lmap){ window._lmap.invalidateSize(); }
-    mpRenderTbl();
-    mpRenderMarkers();
+    // CSS 전환(opacity) 완료 후 지도 크기 재계산 + 마커 표시
+    setTimeout(()=>{
+      if(window._lmap){
+        window._lmap.invalidateSize();
+        mpRenderMarkers();   // 마커 그리기
+        mpRenderTbl();       // 목록 갱신
+        mpFitBounds();       // 등록된 장소 전체 보이도록 지도 범위 맞춤
+      }
+    }, 300);
   }else{
     scr.style.display='';
     mw.classList.remove('active');
@@ -1826,6 +1831,11 @@ function _mpLoad(){
    → Leaflet이 정확한 컨테이너 크기를 읽을 수 있음 */
 function _initLeaflet(){
   if(_lmap) return; // 이미 초기화됨
+  // Leaflet 미로드 시 재시도
+  if(typeof L === 'undefined'){
+    setTimeout(_initLeaflet, 500);
+    return;
+  }
   _mpLoad();
   const el = document.getElementById('kmap');
   if(!el){ return; }
@@ -1851,24 +1861,30 @@ function _initLeaflet(){
   mpRenderTbl();
 }
 
-/* ── 커스텀 마커 아이콘 생성 ── */
-function _makeIcon(cat){
+/* ── 커스텀 마커 아이콘 생성 (상호명 포함) ── */
+function _makeIcon(cat, name){
   const c = _MCAT[cat] || _MCAT['기타'];
+  const label = name ? name.slice(0,10)+(name.length>10?'..':'') : '';
   const html =
     `<div style="
-      background:${c.bg};border:2px solid ${c.cl};
-      border-radius:20px;padding:3px 9px;
-      font-size:12px;font-weight:700;
+      background:${c.bg};
+      border:2px solid ${c.cl};
+      border-radius:20px;
+      padding:4px 10px;
+      font-size:11px;
+      font-weight:700;
       white-space:nowrap;
-      box-shadow:0 2px 8px rgba(0,0,0,.25);
+      box-shadow:0 2px 10px rgba(0,0,0,.28);
       font-family:'Noto Sans KR',sans-serif;
       line-height:1.5;
-    ">${c.e}</div>`;
+      cursor:pointer;
+      color:${c.cl};
+    ">${c.e} ${label}</div>`;
   return L.divIcon({
     html,
     className:'',
-    iconAnchor:[16, 28],
-    popupAnchor:[0,-30]
+    iconAnchor:[0, 36],
+    popupAnchor:[0, -38]
   });
 }
 
@@ -1881,7 +1897,7 @@ function mpRenderMarkers(){
   _MP.forEach(p=>{
     if(!p.lat || !p.lng) return;
     const c    = _MCAT[p.cat] || _MCAT['기타'];
-    const icon = _makeIcon(p.cat);
+    const icon = _makeIcon(p.cat, p.name);  // 상호명 전달
     const m    = L.marker([p.lat, p.lng], {icon}).addTo(_lmap);
     const popHtml =
       `<div style="font-family:'Noto Sans KR',sans-serif;min-width:150px;padding:2px 0">
@@ -1947,12 +1963,57 @@ function mpRenderTbl(){
   }).join('');
 }
 
-/* 테이블 행 클릭 → 지도 해당 마커로 이동 */
+/* ── 등록된 장소 전체 보이도록 지도 범위 자동 맞춤 ── */
+function mpFitBounds(){
+  if(!_lmap) return;
+  const pts = _MP.filter(p=>p.lat&&p.lng);
+  if(!pts.length) return; // 좌표 있는 장소가 없으면 그냥 서울
+  if(pts.length === 1){
+    _lmap.setView([pts[0].lat, pts[0].lng], 15);
+  } else {
+    const bounds = L.latLngBounds(pts.map(p=>[p.lat, p.lng]));
+    _lmap.fitBounds(bounds, {padding:[40, 40], maxZoom:15});
+  }
+}
+
+/* ── 목록 행 클릭 → 지도 이동 ── */
 function mpFocusPlace(id){
   const p = _MP.find(x=>x.id===id);
-  if(!p || !p.lat || !_lmap) return;
-  _lmap.setView([p.lat,p.lng], 15);
-  if(_markers[p.id]) _markers[p.id].openPopup();
+  if(!p || !_lmap) return;
+
+  if(p.lat && p.lng){
+    // 좌표 있으면 바로 이동
+    _lmap.setView([p.lat, p.lng], 16);
+    setTimeout(()=>{ if(_markers[p.id]) _markers[p.id].openPopup(); }, 200);
+  } else {
+    // 좌표 없으면 자동 검색 후 이동
+    const q = p.addr || p.name;
+    toast('위치 검색 중...', 'ok');
+    fetch(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent('대한민국 '+q)}&format=json&limit=1`,
+      {headers:{'Accept-Language':'ko','User-Agent':'SalesJournalApp/1.0'}}
+    )
+    .then(r=>r.json())
+    .then(data=>{
+      if(data && data.length){
+        const d = data[0];
+        // 좌표 저장
+        const idx = _MP.findIndex(x=>x.id===id);
+        if(idx>=0){
+          _MP[idx].lat = parseFloat(d.lat);
+          _MP[idx].lng = parseFloat(d.lon);
+          _mpSave();
+          mpRenderMarkers();
+          mpRenderTbl();
+          _lmap.setView([parseFloat(d.lat), parseFloat(d.lon)], 16);
+          setTimeout(()=>{ if(_markers[id]) _markers[id].openPopup(); }, 300);
+        }
+      } else {
+        toast('위치를 찾지 못했어요. 수정에서 주소를 확인해주세요', 'err');
+      }
+    })
+    .catch(()=> toast('네트워크 오류가 발생했어요', 'err'));
+  }
 }
 
 /* ── 검색바 자동완성 (Nominatim) ── */
@@ -2095,6 +2156,8 @@ function saveMpPlace(){
     if(la && ln && _lmap){
       _lmap.setView([la, ln], 15);
       setTimeout(()=>{ if(_markers[place.id]) _markers[place.id].openPopup(); }, 300);
+    } else if(_lmap){
+      mpFitBounds(); // 좌표 없어도 전체 범위 맞춤
     }
     toast(_editMpId?'수정됐어요!':'저장됐어요!', 'ok');
   };
