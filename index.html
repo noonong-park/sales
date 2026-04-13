@@ -806,9 +806,9 @@ html,body{
     </div>
 
     <div class="fg">
-      <label class="fl">주소 (입력 후 좌표검색 클릭)</label>
+      <label class="fl">주소 (선택사항 — 없어도 저장 가능)</label>
       <div style="display:flex;gap:6px">
-        <input class="fi" id="mpf-addr" placeholder="예: 서울 영등포구 여의도동"
+        <input class="fi" id="mpf-addr" placeholder="예: 영등포구 영등포로 150"
           style="flex:1"
           onkeydown="if(event.key==='Enter')mpFormSearch()">
         <button onclick="mpFormSearch()"
@@ -816,10 +816,13 @@ html,body{
                  border-radius:var(--r2);padding:0 13px;
                  font-size:12px;font-weight:600;cursor:pointer;
                  font-family:inherit;white-space:nowrap;flex-shrink:0">
-          좌표검색
+          지도검색
         </button>
       </div>
       <div id="mpf-msg" style="font-size:11px;margin-top:5px;min-height:16px"></div>
+      <div style="font-size:10px;color:var(--mist);margin-top:3px">
+        💡 주소 못 찾아도 그냥 저장하기 누르면 목록에 등록돼요
+      </div>
       <input type="hidden" id="mpf-lat">
       <input type="hidden" id="mpf-lng">
     </div>
@@ -2017,6 +2020,11 @@ function openMpForm(id){
 function closeMpForm(){ document.getElementById('mpmd').classList.remove('show'); }
 
 /* ── 모달 내 주소 → 좌표 검색 (Nominatim) ── */
+/* ── 모달 내 주소 → 좌표 검색 ──
+   전략1: 주소 그대로 검색
+   전략2: "대한민국 " 붙여서 검색
+   전략3: 국가제한 없이 검색
+   → 모두 실패해도 주소 텍스트만으로 저장 가능 */
 function mpFormSearch(){
   const addr = document.getElementById('mpf-addr').value.trim();
   const name = document.getElementById('mpf-name').value.trim();
@@ -2025,29 +2033,44 @@ function mpFormSearch(){
   if(!q){ alert('상호명 또는 주소를 먼저 입력해주세요'); return; }
   msg.style.color   = 'var(--mist)';
   msg.textContent   = '검색 중...';
-  fetch(
-    `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&countrycodes=kr&limit=1`,
-    {headers:{'Accept-Language':'ko'}}
-  )
-  .then(r=>r.json())
-  .then(data=>{
-    if(data.length){
-      const d = data[0];
-      document.getElementById('mpf-lat').value  = d.lat;
-      document.getElementById('mpf-lng').value  = d.lon;
-      const addrShort = d.display_name.split(',').slice(0,3).join(',');
-      if(!addr) document.getElementById('mpf-addr').value = addrShort;
-      msg.style.color   = 'var(--sage)';
-      msg.textContent   = '✅ 좌표 찾았어요: ' + addrShort;
-    }else{
-      msg.style.color   = 'var(--rose)';
-      msg.textContent   = '❌ 찾지 못했습니다. 주소를 더 구체적으로 입력해보세요';
+
+  // 3단계 fallback 검색
+  const trySearch = (queries) => {
+    if(!queries.length){
+      // 모두 실패 → 좌표 없이도 저장 가능 안내
+      msg.style.color   = '#c9a84c';
+      msg.textContent   = '⚠️ 지도 위치를 찾지 못했어요. 그냥 저장해도 목록엔 등록돼요!';
+      return;
     }
-  })
-  .catch(()=>{
-    msg.style.color   = 'var(--rose)';
-    msg.textContent   = '❌ 검색 오류. 네트워크를 확인해주세요';
-  });
+    const [q, ...rest] = queries;
+    fetch(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1&accept-language=ko`,
+      {headers:{'Accept-Language':'ko', 'User-Agent':'SalesJournalApp/1.0'}}
+    )
+    .then(r=>r.json())
+    .then(data=>{
+      if(data && data.length){
+        const d = data[0];
+        document.getElementById('mpf-lat').value = d.lat;
+        document.getElementById('mpf-lng').value = d.lon;
+        const addrShort = d.display_name.split(',').slice(0,3).join(', ');
+        if(!addr) document.getElementById('mpf-addr').value = addrShort;
+        msg.style.color   = 'var(--sage)';
+        msg.textContent   = '✅ 위치를 찾았어요! 저장하기 버튼을 눌러주세요.';
+      } else {
+        trySearch(rest); // 다음 전략 시도
+      }
+    })
+    .catch(()=>trySearch(rest));
+  };
+
+  // 검색 쿼리 순서: 주소→대한민국+주소→상호명→상호명만
+  const queries = [];
+  if(addr)  queries.push(addr);
+  if(addr)  queries.push('대한민국 ' + addr);
+  if(name && addr) queries.push(name + ' ' + addr);
+  if(name)  queries.push('대한민국 ' + name);
+  trySearch(queries);
 }
 
 /* ── 저장 ── */
@@ -2060,19 +2083,47 @@ function saveMpPlace(){
   const lng  = parseFloat(document.getElementById('mpf-lng').value) || null;
   const note = document.getElementById('mpf-note').value.trim();
 
-  const place = {id: _editMpId || Date.now(), name, cat, addr, lat, lng, note};
-  if(_editMpId) _MP = _MP.map(x=>x.id===_editMpId ? place : x);
-  else          _MP.push(place);
+  const commit = (la, ln, ad) => {
+    const place = {id: _editMpId || Date.now(), name, cat,
+                   addr: ad || addr, lat: la, lng: ln, note};
+    if(_editMpId) _MP = _MP.map(x=>x.id===_editMpId ? place : x);
+    else          _MP.push(place);
+    _mpSave();
+    closeMpForm();
+    mpRenderMarkers();
+    mpRenderTbl();
+    if(la && ln && _lmap){
+      _lmap.setView([la, ln], 15);
+      setTimeout(()=>{ if(_markers[place.id]) _markers[place.id].openPopup(); }, 300);
+    }
+    toast(_editMpId?'수정됐어요!':'저장됐어요!', 'ok');
+  };
 
-  _mpSave();
-  closeMpForm();
-  mpRenderMarkers();
-  mpRenderTbl();
-  if(lat && lng && _lmap){
-    _lmap.setView([lat,lng], 15);
-    setTimeout(()=>{ if(_markers[place.id]) _markers[place.id].openPopup(); }, 300);
+  // 좌표가 이미 있으면 바로 저장
+  if(lat && lng){ commit(lat, lng, addr); return; }
+
+  // 좌표 없고 주소/상호명 있으면 자동 검색 후 저장
+  // → 검색 실패해도 좌표 없이 저장 (지도핀 없이 목록에만 등록)
+  if(addr || name){
+    const q = addr || ('대한민국 ' + name);
+    fetch(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1`,
+      {headers:{'Accept-Language':'ko','User-Agent':'SalesJournalApp/1.0'}}
+    )
+    .then(r=>r.json())
+    .then(data=>{
+      if(data && data.length){
+        const d = data[0];
+        const addrShort = d.display_name.split(',').slice(0,3).join(', ');
+        commit(parseFloat(d.lat), parseFloat(d.lon), addrShort);
+      } else {
+        commit(null, null, addr); // 좌표 없이 저장
+      }
+    })
+    .catch(()=> commit(null, null, addr)); // 오류 시에도 저장
+  } else {
+    commit(null, null, addr);
   }
-  toast(_editMpId?'수정됐어요!':'저장됐어요!','ok');
 }
 
 /* ── 삭제 ── */
